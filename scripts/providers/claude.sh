@@ -135,6 +135,23 @@ provider_get_info() {
     [[ -f "$jsonl" ]] && context=$(_claude_context_from_jsonl "$jsonl")
   fi
 
+  # Fallback: parse context from pane status bar ("to save XXK tokens")
+  if [[ -z "$context" ]]; then
+    local pane_ctx
+    pane_ctx=$(echo "$content" | grep -oE 'to save [0-9]+[KkMm]+ tokens' | tail -1 \
+      | grep -oE '[0-9]+[KkMm]+')
+    if [[ -n "$pane_ctx" ]]; then
+      local num unit
+      num=$(echo "$pane_ctx" | grep -oE '[0-9]+')
+      unit=$(echo "$pane_ctx" | grep -oE '[KkMm]+')
+      case "$unit" in
+        [Kk]) context=$(( num * 1000 )) ;;
+        [Mm]) context=$(( num * 1000000 )) ;;
+        *)    context="$num" ;;
+      esac
+    fi
+  fi
+
   status=$(detect_status "$pane_id" "claude")
 
   echo "${model}|${status}|${context}|${session_name}"
