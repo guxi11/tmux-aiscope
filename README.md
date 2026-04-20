@@ -1,21 +1,20 @@
 # tmux-aiscope
 
-A tmux plugin that shows a fzf-powered popup listing all AI sessions across windows — like `prefix-s` but for AI CLIs.
+A tmux plugin that shows a popup listing all AI sessions across windows — like `prefix-s` but for AI CLIs.
 
 ```
 ▶ session: main
-    ◆ window 1: feat/auth    claude-opus-4.5   ● active   ~18k tokens
-    ◇ window 3: debug        claude-sonnet-4   ○ idle     ~6k tokens
+    ◆ window 1: feat/auth    claude-opus-4.5   ● running   ~18k tokens
+    ◇ window 3: debug        claude-sonnet-4   ○ idle      ~6k tokens
 ▶ session: work
-    ◆ window 2: refactor     aider/gpt-4       ● active   ~45k tokens
+    ◆ window 2: refactor     aider/gpt-4       ● running   ~45k tokens
 ```
 
-Press `prefix + A` → pick a pane → jumps straight to it.
+Press `prefix + a` → pick a pane → jumps straight to it.
 
 ## Requirements
 
 - tmux ≥ 3.2
-- fzf
 - bash ≥ 4.0 (`brew install bash` on macOS)
 
 ## Install
@@ -43,7 +42,7 @@ run-shell ~/.tmux/plugins/tmux-aiscope/tmux-aiscope.tmux
 ## Configuration
 
 ```bash
-set -g @aiscope-key          'A'            # keybinding (default: A)
+set -g @aiscope-key          'a'            # keybinding (default: a)
 set -g @aiscope-popup-size   '80%'          # popup dimensions (default: 80%)
 set -g @aiscope-providers    'claude aider' # enabled providers (default: claude aider)
 set -g @aiscope-show-idle    'on'           # show idle sessions (default: on)
@@ -62,8 +61,10 @@ set -g @aiscope-show-idle    'on'           # show idle sessions (default: on)
 | Key | Action |
 |-----|--------|
 | `Enter` | Jump to selected pane |
-| `ctrl-r` | Refresh list |
-| `Esc` / `ctrl-c` | Close |
+| `j` / `↓` | Move down |
+| `k` / `↑` | Move up |
+| `Tab` | Collapse/expand session |
+| `q` / `Esc` | Close |
 
 ## License
 

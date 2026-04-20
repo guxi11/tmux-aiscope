@@ -15,9 +15,10 @@ detect_status() {
       last_few=$(echo "$tail_lines" | tail -5)
 
       # blocked: permission prompt waiting for user input
-      # patterns: "Do you want to proceed?" with Yes/No,
-      #           "Allow once" / "Deny", etc.
-      if echo "$last_few" | grep -qE 'Do you want to proceed|^\s*[❯>]\s*[0-9]+\.\s*(Yes|No)|Allow once|Allow always'; then
+      # the prompt UI is tall, so check the full tail_lines (20 lines)
+      # patterns: "requires approval", "Do you want to proceed?",
+      #           Yes/No selector, "Allow once", "Esc to cancel"
+      if echo "$tail_lines" | grep -qE 'requires approval|Do you want to proceed|Esc to cancel.*Tab to amend|Allow once|Allow always'; then
         echo "blocked"
         return
       fi
@@ -32,7 +33,7 @@ detect_status() {
         echo "running"
         return
       fi
-      if echo "$tail_lines" | grep -qE '[✳✴✵✶✷✸✹✺✻✼✽] .+…'; then
+      if echo "$last_few" | grep -qE '[✳✴✵✶✷✸✹✺✻✼✽] .+…'; then
         echo "running"
         return
       fi
