@@ -45,13 +45,13 @@ _claude_session_name_from_pane() {
   else
     name=$(echo "$content" | grep -m1 '^❯ [^/]' | sed 's/^❯ //')
   fi
-  [[ -n "$name" ]] && echo "${name:0:60}"
+  [[ -n "$name" ]] && echo "${name:0:120}"
 }
 
 _claude_jsonl_by_name() {
   local project_dir="$1" session_name="$2"
   [[ -d "$project_dir" && -n "$session_name" ]] || return
-  local match_str="${session_name:0:20}"
+  local match_str="${session_name:0:40}"
   local f first_msg
   for f in $(ls -1t "${project_dir}"/*.jsonl 2>/dev/null); do
     # Find first user message whose content doesn't start with <
@@ -135,19 +135,30 @@ provider_get_info() {
     [[ -f "$jsonl" ]] && context=$(_claude_context_from_jsonl "$jsonl")
   fi
 
-  # Fallback: parse context from pane status bar ("to save XXK tokens")
+  # Fallback: parse context from pane content
   if [[ -z "$context" ]]; then
     local pane_ctx
+    # Pattern 1: "to save XXK tokens" (compaction prompt)
     pane_ctx=$(echo "$content" | grep -oE 'to save [0-9]+[KkMm]+ tokens' | tail -1 \
       | grep -oE '[0-9]+[KkMm]+')
+    # Pattern 2: "XX.Xk context" or "XXk context" (status bar)
+    if [[ -z "$pane_ctx" ]]; then
+      pane_ctx=$(echo "$content" | grep -oE '[0-9]+\.?[0-9]*[kKmM] context' | tail -1 \
+        | grep -oE '[0-9]+\.?[0-9]*[kKmM]')
+    fi
+    # Pattern 3: "XXk/200k" ratio display
+    if [[ -z "$pane_ctx" ]]; then
+      pane_ctx=$(echo "$content" | grep -oE '[0-9]+\.?[0-9]*[kKmM]/[0-9]+[kKmM]' | tail -1 \
+        | grep -oE '^[0-9]+\.?[0-9]*[kKmM]')
+    fi
     if [[ -n "$pane_ctx" ]]; then
       local num unit
-      num=$(echo "$pane_ctx" | grep -oE '[0-9]+')
-      unit=$(echo "$pane_ctx" | grep -oE '[KkMm]+')
+      num=$(echo "$pane_ctx" | grep -oE '[0-9]+\.?[0-9]*')
+      unit=$(echo "$pane_ctx" | grep -oE '[KkMm]')
       case "$unit" in
-        [Kk]) context=$(( num * 1000 )) ;;
-        [Mm]) context=$(( num * 1000000 )) ;;
-        *)    context="$num" ;;
+        [Kk]) context=$(printf '%.0f' "$(echo "$num * 1000" | bc)") ;;
+        [Mm]) context=$(printf '%.0f' "$(echo "$num * 1000000" | bc)") ;;
+        *)    context="${num%%.*}" ;;
       esac
     fi
   fi
