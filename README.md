@@ -4,6 +4,8 @@ A tmux plugin that shows a popup listing all AI sessions across windows — like
 
 Press `prefix + a` → pick a pane → jumps straight to it.
 
+![demo](assets/demo.jpg)
+
 ## Requirements
 
 - tmux ≥ 3.2
