@@ -92,12 +92,12 @@ _rebuild() {
   while [ $i -lt ${#all_type[@]} ]; do
     local t="${all_type[$i]}" s="${all_sess[$i]}"
     if [[ "$t" == "H" ]]; then
-      local arrow; _is_collapsed "$s" && arrow="▶" || arrow="▼"
-      local n=0 j=0
-      while [ $j -lt ${#all_type[@]} ]; do
-        [[ "${all_type[$j]}" == "W" && "${all_sess[$j]}" == "$s" ]] && n=$((n+1))
-        j=$((j+1))
+      # Count windows: scan forward until next header (O(n) total)
+      local n=0 j=$((i+1))
+      while [ $j -lt ${#all_type[@]} ] && [[ "${all_type[$j]}" == "W" ]]; do
+        n=$((n+1)); j=$((j+1))
       done
+      local arrow; _is_collapsed "$s" && arrow="▶" || arrow="▼"
       vis_type[${#vis_type[@]}]="H"
       vis_label[${#vis_label[@]}]="$(printf '\033[1m\033[34m  %s %s (%d)\033[0m' "$arrow" "$s" "$n")"
       vis_sess[${#vis_sess[@]}]="$s"

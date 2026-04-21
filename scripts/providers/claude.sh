@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Provider: Claude Code
 # Output: "model|status|context_tokens|session_name"
+# Uses ~/.claude/history.jsonl (pre-indexed) to map pane → sessionId → JSONL.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../detect_status.sh"
@@ -11,61 +12,6 @@ _claude_project_dir() {
   encoded=$(echo "$pane_path" | sed 's|/|-|g')
   local dir="${HOME}/.claude/projects/${encoded}"
   [[ -d "$dir" ]] && echo "$dir"
-}
-
-_claude_latest_jsonl() {
-  local project_dir="$1"
-  ls -1t "${project_dir}"/*.jsonl 2>/dev/null | head -1
-}
-
-_claude_project_dir_for_pane() {
-  local pane_id="$1"
-  local shell_pid claude_pid sess_file cwd
-  shell_pid=$(tmux display-message -p -t "$pane_id" '#{pane_pid}' 2>/dev/null)
-  [[ -z "$shell_pid" ]] && return
-  claude_pid=$(pgrep -P "$shell_pid" 2>/dev/null | head -1)
-  [[ -z "$claude_pid" ]] && return
-  sess_file="${HOME}/.claude/sessions/${claude_pid}.json"
-  [[ -f "$sess_file" ]] || return
-  cwd=$(grep -o '"cwd":"[^"]*"' "$sess_file" | head -1 | cut -d'"' -f4)
-  [[ -z "$cwd" ]] && return
-  local encoded dir
-  encoded=$(echo "$cwd" | sed 's|/|-|g')
-  dir="${HOME}/.claude/projects/${encoded}"
-  [[ -d "$dir" ]] && echo "$dir"
-}
-
-_claude_session_name_from_pane() {
-  local content="$1"
-  local after_clear name
-  # Find line number of last /clear
-  after_clear=$(echo "$content" | grep -n '^❯ /clear' | tail -1 | cut -d: -f1)
-  if [[ -n "$after_clear" ]]; then
-    name=$(echo "$content" | tail -n +"$((after_clear + 1))" | grep -m1 '^❯ [^/]' | sed 's/^❯ //')
-  else
-    name=$(echo "$content" | grep -m1 '^❯ [^/]' | sed 's/^❯ //')
-  fi
-  [[ -n "$name" ]] && echo "${name:0:120}"
-}
-
-_claude_jsonl_by_name() {
-  local project_dir="$1" session_name="$2"
-  [[ -d "$project_dir" && -n "$session_name" ]] || return
-  local match_str="${session_name:0:40}"
-  local f first_msg
-  for f in $(ls -1t "${project_dir}"/*.jsonl 2>/dev/null); do
-    # Find first user message whose content doesn't start with <
-    first_msg=$(grep '"type":"user"' "$f" 2>/dev/null \
-      | grep -v '"content":"<' \
-      | head -1 \
-      | grep -oE '"content":"[^"]{0,100}' \
-      | head -1 \
-      | sed 's/"content":"//')
-    if [[ -n "$first_msg" ]] && echo "$first_msg" | grep -qF "$match_str" 2>/dev/null; then
-      echo "$f"
-      return
-    fi
-  done
 }
 
 _claude_model_from_pane() {
@@ -84,7 +30,6 @@ _claude_model_from_jsonl() {
     *haiku*)  family="Haiku" ;;
     *)        echo "$raw"; return ;;
   esac
-  # claude-sonnet-4-6 → 4.6
   local ver
   ver=$(echo "$raw" | sed -E 's/^claude-(opus|sonnet|haiku)-//; s/-[0-9]{8}.*//; s/-/./g')
   echo "${family} ${ver}"
@@ -93,7 +38,6 @@ _claude_model_from_jsonl() {
 _claude_context_from_jsonl() {
   local jsonl="$1"
   [[ -f "$jsonl" ]] || return
-  # Context = input_tokens + cache_read + cache_creation (last usage entry)
   local line
   line=$(tail -50 "$jsonl" 2>/dev/null | grep 'input_tokens' | tail -1)
   [[ -z "$line" ]] && return
@@ -108,62 +52,68 @@ provider_get_info() {
   local pane_id="$1"
   local content model context status session_name
 
-  content=$(tmux capture-pane -p -t "$pane_id" -S -500 2>/dev/null)
-  model=$(_claude_model_from_pane "$content")
-  session_name=$(_claude_session_name_from_pane "$content")
+  content=$(tmux capture-pane -p -t "$pane_id" -S - 2>/dev/null)
 
-  # JSONL: match by session name, fall back to latest
-  local project_dir jsonl
-  project_dir=$(_claude_project_dir_for_pane "$pane_id")
-  if [[ -z "$project_dir" ]]; then
-    local pane_path
-    pane_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}' 2>/dev/null)
+  local pane_path
+  pane_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}' 2>/dev/null)
+
+  # Extract non-slash user prompts from pane (skip blank lines)
+  local prompts
+  prompts=$(echo "$content" | grep '^❯ [^/]' | sed 's/^❯ //' | grep -v '^\s*$')
+
+  if [[ -z "$prompts" ]]; then
+    status=$(detect_status "$pane_id" "claude" "$content")
+    model=$(_claude_model_from_pane "$content")
+    echo "${model}|${status}||"
+    return
+  fi
+
+  # Session name = last user prompt
+  session_name="$(echo "$prompts" | tail -1 | head -c 100)"
+
+  # Match prompts against history index to find sessionId → JSONL
+  local sid="" jsonl=""
+
+  if [[ -f "$_HISTORY_INDEX" ]]; then
+    local n_prompts
+    n_prompts=$(echo "$prompts" | grep -c .)
+    local window=1
+    while [[ $window -le $n_prompts && $window -le 10 ]]; do
+      local votes
+      votes=$(echo "$prompts" | tail -"$window" | while IFS= read -r p; do
+        local mt="${p:0:40}"
+        mt="${mt#"${mt%%[![:space:]]*}"}"
+        [[ -n "$mt" ]] && awk -F'\t' -v proj="$pane_path" -v text="$mt" \
+          '$1=="H" && $3==proj && index($4, text)>0 {print $2}' \
+          "$_HISTORY_INDEX" | sort -u
+      done | sort | uniq -c | sort -rn)
+      local top_count top_sid second_count
+      top_count=$(echo "$votes" | head -1 | awk '{print $1}')
+      top_sid=$(echo "$votes" | head -1 | awk '{print $2}')
+      second_count=$(echo "$votes" | sed -n '2p' | awk '{print $1+0}')
+      if [[ -n "$top_sid" && "$top_count" -gt "$second_count" ]]; then
+        sid="$top_sid"
+        break
+      fi
+      window=$((window + 1))
+    done
+  fi
+
+  if [[ -n "$sid" ]]; then
+    local project_dir
     project_dir=$(_claude_project_dir "$pane_path")
-  fi
-  if [[ -n "$project_dir" ]]; then
-    if [[ -n "$session_name" ]]; then
-      jsonl=$(_claude_jsonl_by_name "$project_dir" "$session_name")
-    fi
-    # Fallback to latest only if this is the sole claude pane in this project
-    if [[ -z "$jsonl" ]]; then
-      local n_panes
-      n_panes=$(tmux list-panes -a -F '#{pane_current_command}|#{pane_current_path}' 2>/dev/null \
-        | grep "^claude|" | grep -c "$(tmux display-message -p -t "$pane_id" '#{pane_current_path}' 2>/dev/null)")
-      [[ "$n_panes" -le 1 ]] 2>/dev/null && jsonl=$(_claude_latest_jsonl "$project_dir")
-    fi
-    [[ -z "$model" && -f "$jsonl" ]] && model=$(_claude_model_from_jsonl "$jsonl")
-    [[ -f "$jsonl" ]] && context=$(_claude_context_from_jsonl "$jsonl")
+    [[ -n "$project_dir" ]] && jsonl="${project_dir}/${sid}.jsonl"
   fi
 
-  # Fallback: parse context from pane content
-  if [[ -z "$context" ]]; then
-    local pane_ctx
-    # Pattern 1: "to save XXK tokens" (compaction prompt)
-    pane_ctx=$(echo "$content" | grep -oE 'to save [0-9]+[KkMm]+ tokens' | tail -1 \
-      | grep -oE '[0-9]+[KkMm]+')
-    # Pattern 2: "XX.Xk context" or "XXk context" (status bar)
-    if [[ -z "$pane_ctx" ]]; then
-      pane_ctx=$(echo "$content" | grep -oE '[0-9]+\.?[0-9]*[kKmM] context' | tail -1 \
-        | grep -oE '[0-9]+\.?[0-9]*[kKmM]')
-    fi
-    # Pattern 3: "XXk/200k" ratio display
-    if [[ -z "$pane_ctx" ]]; then
-      pane_ctx=$(echo "$content" | grep -oE '[0-9]+\.?[0-9]*[kKmM]/[0-9]+[kKmM]' | tail -1 \
-        | grep -oE '^[0-9]+\.?[0-9]*[kKmM]')
-    fi
-    if [[ -n "$pane_ctx" ]]; then
-      local num unit
-      num=$(echo "$pane_ctx" | grep -oE '[0-9]+\.?[0-9]*')
-      unit=$(echo "$pane_ctx" | grep -oE '[KkMm]')
-      case "$unit" in
-        [Kk]) context=$(printf '%.0f' "$(echo "$num * 1000" | bc)") ;;
-        [Mm]) context=$(printf '%.0f' "$(echo "$num * 1000000" | bc)") ;;
-        *)    context="${num%%.*}" ;;
-      esac
-    fi
+  # Model + context from JSONL
+  if [[ -f "$jsonl" ]]; then
+    model=$(_claude_model_from_jsonl "$jsonl")
+    context=$(_claude_context_from_jsonl "$jsonl")
   fi
+  [[ -z "$model" ]] && model=$(_claude_model_from_pane "$content")
 
-  status=$(detect_status "$pane_id" "claude")
+  # Status from pane content (most accurate for real-time blocked/running detection)
+  status=$(detect_status "$pane_id" "claude" "$content")
 
   echo "${model}|${status}|${context}|${session_name}"
 }

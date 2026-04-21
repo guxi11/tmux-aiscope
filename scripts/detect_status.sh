@@ -3,8 +3,8 @@
 
 detect_status() {
   local pane_id="$1" process="$2"
-  local content
-  content=$(tmux capture-pane -p -t "$pane_id" 2>/dev/null)
+  local content="${3:-}"
+  [[ -z "$content" ]] && content=$(tmux capture-pane -p -t "$pane_id" 2>/dev/null)
 
   case "$process" in
     claude)

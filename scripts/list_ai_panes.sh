@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scan all panes for AI processes.
-# Output (tab-separated): session  win_idx  win_name  pane_id  process  model  status  context
+# Output (tab-separated): session  win_idx  win_name  pane_id  process  model  status  context  sess_name
 
 _LIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -22,6 +22,34 @@ _fmt_context() {
   else
     printf "%d" "$t"
   fi
+}
+
+# Build history index from ~/.claude/history.jsonl.
+# Output format (tab-separated):
+#   H<TAB>sessionId<TAB>project<TAB>display_prefix_80
+#   N<TAB>sessionId<TAB>session_name_100
+_build_history_index() {
+  local out="$1"
+  local hfile="${HOME}/.claude/history.jsonl"
+  [[ -f "$hfile" ]] || return
+  tail -5000 "$hfile" | python3 -c "
+import json,sys
+seen={}
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try: d=json.loads(line)
+    except: continue
+    disp=d.get('display','')
+    proj=d.get('project','')
+    sid=d.get('sessionId','')
+    if not disp or not sid: continue
+    print('H\t'+sid+'\t'+proj+'\t'+disp[:80])
+    if sid not in seen and not disp.startswith('/'):
+        seen[sid]=disp[:100]
+for sid,name in seen.items():
+    print('N\t'+sid+'\t'+name)
+" > "$out" 2>/dev/null
 }
 
 _process_pane() {
@@ -52,10 +80,31 @@ _process_pane() {
 }
 
 main() {
-  while IFS='|' read -r session win_idx win_name pane_id cmd; do
-    _process_pane "$session" "$win_idx" "$win_name" "$pane_id" "$cmd"
-  done < <(tmux list-panes -a \
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  # Pre-build history index (single read, shared by all panes)
+  _build_history_index "$tmpdir/history_index"
+  export _HISTORY_INDEX="$tmpdir/history_index"
+
+  local pane_data
+  pane_data=$(tmux list-panes -a \
     -F '#{session_name}|#{window_index}|#{window_name}|#{pane_id}|#{pane_current_command}')
+
+  local outdir="$tmpdir/out"
+  mkdir -p "$outdir"
+
+  local idx=0
+  while IFS='|' read -r session win_idx win_name pane_id cmd; do
+    (
+      _process_pane "$session" "$win_idx" "$win_name" "$pane_id" "$cmd"
+    ) > "$outdir/$(printf '%04d' $idx)" &
+    idx=$((idx+1))
+  done <<< "$pane_data"
+
+  wait
+  cat "$outdir"/* 2>/dev/null
 }
 
 main "$@"
