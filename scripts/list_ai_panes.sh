@@ -7,7 +7,6 @@ _LIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _provider_for() {
   case "$1" in
     claude) echo "claude" ;;
-    aider)  echo "aider"  ;;
     *)      echo ""        ;;
   esac
 }
