@@ -1,10 +1,54 @@
 #!/usr/bin/env bash
 # Provider: Claude Code
 # Output: "model|status|context_tokens|session_name"
-# Status: primarily from JSONL mtime + last-entry type; terminal fallback for edge cases.
+#
+# Status detection priority:
+#   1. JSONL mtime + last-entry type (structured, reliable)
+#   2. Terminal capture fallback (for fresh sessions without JSONL)
+#
+# Session resolution:
+#   PID → sessions/{pid}.json → cwd (reliable)
+#   History index → sessionId (reliable after /clear)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../detect_status.sh"
+
+# ── Init hook: build history index (called once by list_ai_panes.sh) ──
+
+# Build history index from ~/.claude/history.jsonl.
+# Output format (tab-separated):
+#   H<TAB>sessionId<TAB>project<TAB>display_prefix_80
+#   N<TAB>sessionId<TAB>session_name_300
+provider_init() {
+  local tmpdir="$1"
+  local hfile="${HOME}/.claude/history.jsonl"
+  local out="$tmpdir/claude_history_index"
+
+  if [[ -f "$hfile" ]]; then
+    tail -5000 "$hfile" | python3 -c "
+import json,sys
+seen={}
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try: d=json.loads(line)
+    except: continue
+    disp=d.get('display','')
+    proj=d.get('project','')
+    sid=d.get('sessionId','')
+    if not disp or not sid: continue
+    print('H\t'+sid+'\t'+proj+'\t'+disp[:80])
+    if not disp.startswith('/') and sid not in seen:
+        seen[sid]=disp[:300]
+for sid,disp in seen.items():
+    print('N\t'+sid+'\t'+disp)
+" > "$out" 2>/dev/null
+  fi
+
+  export _CLAUDE_HISTORY_INDEX="$out"
+}
+
+# ── Internal helpers ──
 
 _claude_project_dir() {
   local pane_path="$1"
@@ -66,7 +110,37 @@ _claude_cwd_from_pane() {
   grep -o '"cwd":"[^"]*"' "$sess_file" | head -1 | cut -d'"' -f4
 }
 
-# Detect status from JSONL file: mtime + last entry type
+# Find sessionId by matching visible prompts against history index.
+# Uses sliding-window majority vote for disambiguation.
+_claude_resolve_session() {
+  local prompts="$1" project_path="$2"
+  [[ -z "$prompts" || ! -f "$_CLAUDE_HISTORY_INDEX" ]] && return
+
+  local n_prompts
+  n_prompts=$(echo "$prompts" | grep -c .)
+  local window=1
+  while [[ $window -le $n_prompts && $window -le 10 ]]; do
+    local votes
+    votes=$(echo "$prompts" | tail -"$window" | while IFS= read -r p; do
+      local mt="${p:0:40}"
+      mt="${mt#"${mt%%[![:space:]]*}"}"
+      [[ -n "$mt" ]] && awk -F'\t' -v proj="$project_path" -v text="$mt" \
+        '$1=="H" && $3==proj && index($4, text)>0 {print $2}' \
+        "$_CLAUDE_HISTORY_INDEX" | sort -u
+    done | sort | uniq -c | sort -rn)
+    local top_count top_sid second_count
+    top_count=$(echo "$votes" | head -1 | awk '{print $1}')
+    top_sid=$(echo "$votes" | head -1 | awk '{print $2}')
+    second_count=$(echo "$votes" | sed -n '2p' | awk '{print $1+0}')
+    if [[ -n "$top_sid" && "$top_count" -gt "$second_count" ]]; then
+      echo "$top_sid"
+      return
+    fi
+    window=$((window + 1))
+  done
+}
+
+# Detect status from JSONL file: mtime + last entry type.
 # Returns: running | blocked | idle | "" (unknown/no file)
 _claude_status_from_jsonl() {
   local jsonl="$1"
@@ -94,7 +168,6 @@ _claude_status_from_jsonl() {
   entry_subtype=$(echo "$last_line" | grep -o '"subtype":"[^"]*"' | head -1 | cut -d'"' -f4)
 
   # Definitive idle: turn completed normally
-  # system/turn_duration and file-history-snapshot both appear at turn end
   case "$entry_type" in
     system)
       [[ "$entry_subtype" == "turn_duration" ]] && { echo "idle"; return; } ;;
@@ -104,20 +177,20 @@ _claude_status_from_jsonl() {
 
   # assistant with tool_use as last entry = waiting for permission
   if [[ "$entry_type" == "assistant" ]] && echo "$last_line" | grep -q '"type":"tool_use"'; then
-    # Sanity: if stale (>5min), probably a crash, not truly blocked
     [ "$age" -gt 300 ] && { echo "idle"; return; }
     echo "blocked"
     return
   fi
 
-  # user/ or attachment/ as last entry = turn in progress (claude generating)
-  # Guard with timeout: if >5min with no JSONL write, likely crashed
+  # user/ or attachment/ = turn in progress (claude generating)
   if [ "$age" -gt 300 ]; then
     echo "idle"
   else
     echo "running"
   fi
 }
+
+# ── Provider entry point ──
 
 provider_get_info() {
   local pane_id="$1"
@@ -126,73 +199,47 @@ provider_get_info() {
   local pane_path
   pane_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}' 2>/dev/null)
 
-  # ── Resolve project dir (PID session file for cwd, or pane path) ──
+  # Resolve project dir (PID session file for cwd, or pane path)
   local project_dir sess_cwd
   sess_cwd=$(_claude_cwd_from_pane "$pane_id")
   project_dir=$(_claude_project_dir "${sess_cwd:-$pane_path}")
 
-  # ── Find sessionId via history index (reliable after /clear) ──
+  # Find sessionId via history index (reliable after /clear)
   local sid="" jsonl=""
   content=$(tmux capture-pane -p -t "$pane_id" -S - 2>/dev/null)
   local prompts
   prompts=$(echo "$content" | grep '^❯ [^/]' | sed 's/^❯ //' | grep -v '^\s*$')
 
   if [[ -z "$prompts" && -z "$project_dir" ]]; then
-    status=$(detect_status "$pane_id" "claude" "$content")
+    status=$(detect_status_claude_terminal "$pane_id" "$content")
     model=$(_claude_model_from_pane "$content")
     echo "${model}|${status}||"
     return
   fi
 
-  if [[ -n "$prompts" && -f "$_HISTORY_INDEX" ]]; then
-    local n_prompts
-    n_prompts=$(echo "$prompts" | grep -c .)
-    local window=1
-    while [[ $window -le $n_prompts && $window -le 10 ]]; do
-      local votes
-      votes=$(echo "$prompts" | tail -"$window" | while IFS= read -r p; do
-        local mt="${p:0:40}"
-        mt="${mt#"${mt%%[![:space:]]*}"}"
-        [[ -n "$mt" ]] && awk -F'\t' -v proj="${sess_cwd:-$pane_path}" -v text="$mt" \
-          '$1=="H" && $3==proj && index($4, text)>0 {print $2}' \
-          "$_HISTORY_INDEX" | sort -u
-      done | sort | uniq -c | sort -rn)
-      local top_count top_sid second_count
-      top_count=$(echo "$votes" | head -1 | awk '{print $1}')
-      top_sid=$(echo "$votes" | head -1 | awk '{print $2}')
-      second_count=$(echo "$votes" | sed -n '2p' | awk '{print $1+0}')
-      if [[ -n "$top_sid" && "$top_count" -gt "$second_count" ]]; then
-        sid="$top_sid"
-        break
-      fi
-      window=$((window + 1))
-    done
-  fi
+  sid=$(_claude_resolve_session "$prompts" "${sess_cwd:-$pane_path}")
 
   # JSONL from history match
   if [[ -n "$sid" && -n "$project_dir" ]]; then
     jsonl="${project_dir}/${sid}.jsonl"
   fi
 
-  # No latest-JSONL fallback: multiple panes can share a project dir,
-  # so picking the most recent JSONL would conflate different sessions.
-
-  # ── Session name ──
-  if [[ -n "$sid" && -f "$_HISTORY_INDEX" ]]; then
-    session_name=$(awk -F'\t' -v sid="$sid" '$1=="N" && $2==sid {print $3}' "$_HISTORY_INDEX" | tail -1)
+  # Session name
+  if [[ -n "$sid" && -f "$_CLAUDE_HISTORY_INDEX" ]]; then
+    session_name=$(awk -F'\t' -v sid="$sid" '$1=="N" && $2==sid {print $3}' "$_CLAUDE_HISTORY_INDEX" | tail -1)
   fi
   [[ -z "$session_name" ]] && session_name="$(echo "$prompts" | tail -1 | head -c 300)"
 
-  # ── Model + context from JSONL ──
+  # Model + context from JSONL
   if [[ -f "$jsonl" ]]; then
     model=$(_claude_model_from_jsonl "$jsonl")
     context=$(_claude_context_from_jsonl "$jsonl")
   fi
   [[ -z "$model" ]] && model=$(_claude_model_from_pane "$content")
 
-  # ── Status: JSONL-based (primary) → terminal fallback ──
+  # Status: JSONL-based (primary) → terminal fallback
   status=$(_claude_status_from_jsonl "$jsonl")
-  [[ -z "$status" ]] && status=$(detect_status "$pane_id" "claude" "$content")
+  [[ -z "$status" ]] && status=$(detect_status_claude_terminal "$pane_id" "$content")
 
   echo "${model}|${status}|${context}|${session_name}"
 }

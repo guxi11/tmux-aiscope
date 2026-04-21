@@ -2,14 +2,6 @@
 
 A tmux plugin that shows a popup listing all AI sessions across windows — like `prefix-s` but for AI CLIs.
 
-```
-▶ session: main
-    ◆ window 1: feat/auth    claude-opus-4.5   ● running   ~18k tokens
-    ◇ window 3: debug        claude-sonnet-4   ○ idle      ~6k tokens
-▶ session: work
-    ◆ window 2: refactor     aider/gpt-4       ● running   ~45k tokens
-```
-
 Press `prefix + a` → pick a pane → jumps straight to it.
 
 ## Requirements
@@ -44,7 +36,7 @@ run-shell ~/.tmux/plugins/tmux-aiscope/tmux-aiscope.tmux
 ```bash
 set -g @aiscope-key          'a'            # keybinding (default: a)
 set -g @aiscope-popup-size   '80%'          # popup dimensions (default: 80%)
-set -g @aiscope-providers    'claude aider' # enabled providers (default: claude aider)
+set -g @aiscope-providers    'claude aider' # enabled providers (default: claude)
 set -g @aiscope-show-idle    'on'           # show idle sessions (default: on)
 ```
 

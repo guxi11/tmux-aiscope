@@ -24,34 +24,6 @@ _fmt_context() {
   fi
 }
 
-# Build history index from ~/.claude/history.jsonl.
-# Output format (tab-separated):
-#   H<TAB>sessionId<TAB>project<TAB>display_prefix_80
-#   N<TAB>sessionId<TAB>session_name_100
-_build_history_index() {
-  local out="$1"
-  local hfile="${HOME}/.claude/history.jsonl"
-  [[ -f "$hfile" ]] || return
-  tail -5000 "$hfile" | python3 -c "
-import json,sys
-seen={}
-for line in sys.stdin:
-    line=line.strip()
-    if not line: continue
-    try: d=json.loads(line)
-    except: continue
-    disp=d.get('display','')
-    proj=d.get('project','')
-    sid=d.get('sessionId','')
-    if not disp or not sid: continue
-    print('H\t'+sid+'\t'+proj+'\t'+disp[:80])
-    if not disp.startswith('/') and sid not in seen:
-        seen[sid]=disp[:300]
-for sid,disp in seen.items():
-    print('N\t'+sid+'\t'+disp)
-" > "$out" 2>/dev/null
-}
-
 _process_pane() {
   local session="$1" win_idx="$2" win_name="$3" pane_id="$4" cmd="$5"
   local process="${cmd##*/}"
@@ -84,10 +56,19 @@ main() {
   tmpdir=$(mktemp -d)
   trap 'rm -rf "$tmpdir"' EXIT
 
-  # Pre-build history index (single read, shared by all panes)
-  _build_history_index "$tmpdir/history_index"
-  export _HISTORY_INDEX="$tmpdir/history_index"
+  # ── Phase 1: Provider init hooks ──
+  # Each provider can implement provider_init() to prepare shared data
+  # (e.g., build indexes, cache lookups). Runs once in the parent shell
+  # so env vars are inherited by all parallel pane workers.
+  for _provider_script in "$_LIST_DIR"/providers/*.sh; do
+    source "$_provider_script"
+    if declare -f provider_init >/dev/null 2>&1; then
+      provider_init "$tmpdir"
+    fi
+    unset -f provider_init provider_get_info 2>/dev/null
+  done
 
+  # ── Phase 2: Process panes in parallel ──
   local pane_data
   pane_data=$(tmux list-panes -a \
     -F '#{session_name}|#{window_index}|#{window_name}|#{pane_id}|#{pane_current_command}')
@@ -104,7 +85,6 @@ main() {
   done <<< "$pane_data"
 
   wait
-
   cat "$outdir"/* 2>/dev/null
 }
 

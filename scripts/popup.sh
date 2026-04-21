@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Interactive AI pane selector inside tmux display-popup.
-# j/k or arrows: navigate, Enter: jump, Tab: collapse/expand, q/Esc: close.
+# j/k or arrows: navigate, Enter: jump, Tab: cycle filter, a/i/r/b: filter, l: fold, q/Esc: close.
 
 _POPUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -10,17 +10,19 @@ all_label=()     # display string (window rows only)
 all_sess=()      # session name
 all_widx=()      # window index
 all_pid=()       # pane id
+all_status=()    # idle/running/blocked (windows only)
 
-# ── Visible subset (rebuilt on collapse) ──
+# ── Visible subset (rebuilt on filter) ──
 vis_type=()
 vis_label=()
 vis_sess=()
 vis_widx=()
 vis_pid=()
 
-collapsed=""     # space-separated collapsed session names
+filter_mode="all"  # all|idle|running|blocked
+collapsed=""       # space-separated collapsed session names
 selected=0
-_SHORTCUT_POOL="0123456789abcdefgimnoprstuvwxyz"
+_SHORTCUT_POOL="0123456789cdefgmnopstuvwxyz"
 cur_sess="" cur_widx=""
 
 # ── Collapse helpers ──
@@ -35,6 +37,35 @@ _toggle_collapse() {
   else
     collapsed="$collapsed $1"
   fi
+}
+
+# ── Filter helpers ──
+_set_filter() {
+  filter_mode="$1"
+  local prev_sess="${vis_sess[$selected]}" prev_widx="${vis_widx[$selected]}" prev_type="${vis_type[$selected]}"
+  _rebuild
+  local i=0
+  while [ $i -lt ${#vis_type[@]} ]; do
+    if [[ "${vis_sess[$i]}" == "$prev_sess" && "${vis_widx[$i]}" == "$prev_widx" && "${vis_type[$i]}" == "$prev_type" ]]; then
+      selected=$i; return
+    fi
+    i=$((i+1))
+  done
+  i=0
+  while [ $i -lt ${#vis_type[@]} ]; do
+    [[ "${vis_type[$i]}" == "W" ]] && { selected=$i; return; }
+    i=$((i+1))
+  done
+  selected=0
+}
+
+_cycle_filter() {
+  case "$filter_mode" in
+    all)     _set_filter "idle" ;;
+    idle)    _set_filter "running" ;;
+    running) _set_filter "blocked" ;;
+    blocked) _set_filter "all" ;;
+  esac
 }
 
 # ── Load all data ──
@@ -59,6 +90,7 @@ _load() {
       all_sess[${#all_sess[@]}]="$sess"
       all_widx[${#all_widx[@]}]=""
       all_pid[${#all_pid[@]}]=""
+      all_status[${#all_status[@]}]=""
       prev="$sess"
     fi
 
@@ -81,11 +113,13 @@ _load() {
     [[ -n "$ctx" ]]   && line="$line  $(printf '\033[2m%s\033[0m' "$ctx")"
     [[ -n "$sname" ]] && line="$line  $(printf '\033[33m%s\033[0m' "$sname")"
 
+    local nst; case "$status" in running|blocked) nst="$status" ;; *) nst="idle" ;; esac
     all_type[${#all_type[@]}]="W"
     all_label[${#all_label[@]}]="$line"
     all_sess[${#all_sess[@]}]="$sess"
     all_widx[${#all_widx[@]}]="$widx"
     all_pid[${#all_pid[@]}]="$pid"
+    all_status[${#all_status[@]}]="$nst"
   done <<< "$data"
   return 0
 }
@@ -97,19 +131,24 @@ _rebuild() {
   while [ $i -lt ${#all_type[@]} ]; do
     local t="${all_type[$i]}" s="${all_sess[$i]}"
     if [[ "$t" == "H" ]]; then
-      # Count windows: scan forward until next header (O(n) total)
+      # Count matching windows under this header
       local n=0 j=$((i+1))
       while [ $j -lt ${#all_type[@]} ] && [[ "${all_type[$j]}" == "W" ]]; do
-        n=$((n+1)); j=$((j+1))
+        if [[ "$filter_mode" == "all" ]] || [[ "${all_status[$j]}" == "$filter_mode" ]]; then
+          n=$((n+1))
+        fi
+        j=$((j+1))
       done
-      local arrow; _is_collapsed "$s" && arrow="+" || arrow="-"
-      vis_type[${#vis_type[@]}]="H"
-      vis_label[${#vis_label[@]}]="$(printf ' \033[1m%s %s\033[0m \033[2m(%d)\033[0m' "$arrow" "$s" "$n")"
-      vis_sess[${#vis_sess[@]}]="$s"
-      vis_widx[${#vis_widx[@]}]=""
-      vis_pid[${#vis_pid[@]}]=""
+      if [ $n -gt 0 ]; then
+        local arrow; _is_collapsed "$s" && arrow="+" || arrow="-"
+        vis_type[${#vis_type[@]}]="H"
+        vis_label[${#vis_label[@]}]="$(printf ' \033[1m%s %s\033[0m \033[2m(%d)\033[0m' "$arrow" "$s" "$n")"
+        vis_sess[${#vis_sess[@]}]="$s"
+        vis_widx[${#vis_widx[@]}]=""
+        vis_pid[${#vis_pid[@]}]=""
+      fi
     elif [[ "$t" == "W" ]]; then
-      if ! _is_collapsed "$s"; then
+      if ! _is_collapsed "$s" && { [[ "$filter_mode" == "all" ]] || [[ "${all_status[$i]}" == "$filter_mode" ]]; }; then
         vis_type[${#vis_type[@]}]="W"
         vis_label[${#vis_label[@]}]="  ${all_label[$i]}"
         vis_sess[${#vis_sess[@]}]="$s"
@@ -159,7 +198,18 @@ _default_sel() {
 
 # ── Render ──
 _draw() {
-  printf '\033[H\033[1m  AI Panes\033[0m  \033[2mh:prev  j/k:nav  l:fold  enter:jump  q:quit\033[0m\n\n'
+  printf '\033[H\033[1m  AI Panes\033[0m  \033[2mj/k:nav  h:prev  l:fold  enter:jump  q:quit\033[0m\n'
+  printf '  \033[2m─────────────────────────────────────────────────\033[0m\n'
+  local fi=""
+  for m in all:a idle:i running:r blocked:b; do
+    local name="${m%%:*}" key="${m##*:}"
+    if [[ "$name" == "$filter_mode" ]]; then
+      fi="$fi\033[7m ${name}(\033[1m${key}\033[22m) \033[0m "
+    else
+      fi="$fi\033[2m${name}(\033[22;1m${key}\033[22;2m)\033[0m "
+    fi
+  done
+  printf '  %b \033[2mtab:cycle\033[0m\n\n' "$fi"
   local i=0 pool_len=${#_SHORTCUT_POOL}
   while [ $i -lt ${#vis_label[@]} ]; do
     if [ $i -eq $selected ]; then
@@ -245,13 +295,13 @@ while true; do
     $'\033[A'|k) _move -1 ;;
     $'\033[B'|j) _move 1 ;;
     h)           _move_prev_session ;;
-    l|$'\t')     _do_toggle ;;
-    '')
-      if [[ "${vis_type[$selected]}" == "H" ]]; then
-        _do_toggle
-      else
-        _do_jump && break
-      fi ;;
+    $'\t')       _cycle_filter ;;
+    l)           _do_toggle ;;
+    a)           _set_filter "all" ;;
+    i)           _set_filter "idle" ;;
+    r)           _set_filter "running" ;;
+    b)           _set_filter "blocked" ;;
+    '')          _do_jump && break ;;
     q|$'\033')   break ;;
     *)           _try_shortcut "$_key" ;;
   esac
