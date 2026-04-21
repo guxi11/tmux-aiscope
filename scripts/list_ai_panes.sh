@@ -105,16 +105,7 @@ main() {
 
   wait
 
-  local results
-  results=$(cat "$outdir"/* 2>/dev/null)
-
-  # Rename tmux windows to session's last display
-  while IFS=$'\t' read -r _s _wi _wn _pi _pr _mo _st _cx sn; do
-    [[ -n "$sn" && "$sn" != "-" ]] && \
-      tmux rename-window -t "${_s}:${_wi}" "${sn:0:50}" 2>/dev/null
-  done <<< "$results"
-
-  printf '%s\n' "$results"
+  cat "$outdir"/* 2>/dev/null
 }
 
 main "$@"
