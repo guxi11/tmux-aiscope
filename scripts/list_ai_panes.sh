@@ -45,10 +45,10 @@ for line in sys.stdin:
     sid=d.get('sessionId','')
     if not disp or not sid: continue
     print('H\t'+sid+'\t'+proj+'\t'+disp[:80])
-    if sid not in seen and not disp.startswith('/'):
-        seen[sid]=disp[:100]
-for sid,name in seen.items():
-    print('N\t'+sid+'\t'+name)
+    if not disp.startswith('/'):
+        seen[sid]=disp[:300]
+for sid,disp in seen.items():
+    print('N\t'+sid+'\t'+disp)
 " > "$out" 2>/dev/null
 }
 

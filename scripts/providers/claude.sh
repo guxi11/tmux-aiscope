@@ -57,7 +57,7 @@ provider_get_info() {
   local pane_path
   pane_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}' 2>/dev/null)
 
-  # Extract non-slash user prompts from pane (skip blank lines)
+  # Extract ❯ prompt lines only (no continuation joining — used for matching)
   local prompts
   prompts=$(echo "$content" | grep '^❯ [^/]' | sed 's/^❯ //' | grep -v '^\s*$')
 
@@ -67,9 +67,6 @@ provider_get_info() {
     echo "${model}|${status}||"
     return
   fi
-
-  # Session name = last user prompt
-  session_name="$(echo "$prompts" | tail -1 | head -c 100)"
 
   # Match prompts against history index to find sessionId → JSONL
   local sid="" jsonl=""
@@ -98,6 +95,12 @@ provider_get_info() {
       window=$((window + 1))
     done
   fi
+
+  # Session name: from history (full display, 300 chars) or pane prompt fallback
+  if [[ -n "$sid" && -f "$_HISTORY_INDEX" ]]; then
+    session_name=$(awk -F'\t' -v sid="$sid" '$1=="N" && $2==sid {print $3}' "$_HISTORY_INDEX" | tail -1)
+  fi
+  [[ -z "$session_name" ]] && session_name="$(echo "$prompts" | tail -1 | head -c 300)"
 
   if [[ -n "$sid" ]]; then
     local project_dir
