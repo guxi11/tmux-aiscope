@@ -45,7 +45,7 @@ for line in sys.stdin:
     sid=d.get('sessionId','')
     if not disp or not sid: continue
     print('H\t'+sid+'\t'+proj+'\t'+disp[:80])
-    if not disp.startswith('/'):
+    if not disp.startswith('/') and sid not in seen:
         seen[sid]=disp[:300]
 for sid,disp in seen.items():
     print('N\t'+sid+'\t'+disp)
@@ -104,7 +104,17 @@ main() {
   done <<< "$pane_data"
 
   wait
-  cat "$outdir"/* 2>/dev/null
+
+  local results
+  results=$(cat "$outdir"/* 2>/dev/null)
+
+  # Rename tmux windows to session's last display
+  while IFS=$'\t' read -r _s _wi _wn _pi _pr _mo _st _cx sn; do
+    [[ -n "$sn" && "$sn" != "-" ]] && \
+      tmux rename-window -t "${_s}:${_wi}" "${sn:0:50}" 2>/dev/null
+  done <<< "$results"
+
+  printf '%s\n' "$results"
 }
 
 main "$@"

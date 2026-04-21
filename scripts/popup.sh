@@ -20,6 +20,7 @@ vis_pid=()
 
 collapsed=""     # space-separated collapsed session names
 selected=0
+_SHORTCUT_POOL="0123456789abcdefgimnoprstuvwxyz"
 cur_sess="" cur_widx=""
 
 # ── Collapse helpers ──
@@ -63,13 +64,17 @@ _load() {
 
     # Build window display line
     local icon
-    if [[ "$status" == "running" ]]; then
-      icon=$(printf '\033[32m●\033[0m')
-    else
-      icon=$(printf '\033[90m○\033[0m')
-    fi
+    case "$status" in
+      running) icon=$(printf '\033[32m●\033[0m') ;;
+      blocked) icon=$(printf '\033[33m●\033[0m') ;;
+      *)       icon=$(printf '\033[90m○\033[0m') ;;
+    esac
     local st_text
-    [[ "$status" == "running" ]] && st_text="running" || st_text="idle   "
+    case "$status" in
+      running) st_text="running" ;;
+      blocked) st_text="blocked" ;;
+      *)       st_text="idle   " ;;
+    esac
     local line
     line=$(printf ' %s %-7s' "$icon" "$st_text")
     [[ -n "$model" ]] && line="$line  $(printf '\033[36m%s\033[0m' "$model")"
@@ -118,11 +123,22 @@ _rebuild() {
 
 # ── Navigation ──
 _move() {
-  local dir="$1" n
-  n=$((selected + dir))
-  if [ $n -ge 0 ] && [ $n -lt ${#vis_type[@]} ]; then
-    selected=$n
-  fi
+  local dir="$1" n=${#vis_type[@]}
+  selected=$(( (selected + dir + n) % n ))
+}
+
+_move_prev_session() {
+  local i=$((selected - 1)) n=${#vis_type[@]}
+  while [ $i -ge 0 ]; do
+    [[ "${vis_type[$i]}" == "H" ]] && { selected=$i; return; }
+    i=$((i-1))
+  done
+  # wrap to last header
+  i=$((n - 1))
+  while [ $i -gt $selected ]; do
+    [[ "${vis_type[$i]}" == "H" ]] && { selected=$i; return; }
+    i=$((i-1))
+  done
 }
 
 _default_sel() {
@@ -143,13 +159,17 @@ _default_sel() {
 
 # ── Render ──
 _draw() {
-  printf '\033[H\033[1m  AI Panes\033[0m  \033[2mtab:fold  j/k:nav  enter:jump  q:quit\033[0m\n\n'
-  local i=0
+  printf '\033[H\033[1m  AI Panes\033[0m  \033[2mh:prev  j/k:nav  l:fold  enter:jump  q:quit\033[0m\n\n'
+  local i=0 pool_len=${#_SHORTCUT_POOL}
   while [ $i -lt ${#vis_label[@]} ]; do
     if [ $i -eq $selected ]; then
-      printf '\033[36m>\033[0m%s\033[K\n' "${vis_label[$i]}"
+      local sc=" "
+      [ $i -lt $pool_len ] && sc="${_SHORTCUT_POOL:$i:1}"
+      printf '\033[7m%s\033[0m%s\033[K\n' "$sc" "${vis_label[$i]}"
     else
-      printf ' %s\033[K\n' "${vis_label[$i]}"
+      local sc=" "
+      [ $i -lt $pool_len ] && sc=$(printf '\033[90m%s\033[0m' "${_SHORTCUT_POOL:$i:1}")
+      printf '%s%s\033[K\n' "$sc" "${vis_label[$i]}"
     fi
     i=$((i+1))
   done
@@ -178,6 +198,19 @@ _do_jump() {
   tmux select-window -t "${s}:${w}" 2>/dev/null
   tmux select-pane -t "$p" 2>/dev/null
   return 0
+}
+
+_try_shortcut() {
+  local key="$1" i=0 n=${#vis_type[@]}
+  [ $n -gt ${#_SHORTCUT_POOL} ] && n=${#_SHORTCUT_POOL}
+  while [ $i -lt $n ]; do
+    if [[ "$key" == "${_SHORTCUT_POOL:$i:1}" ]]; then
+      selected=$i
+      return 0
+    fi
+    i=$((i+1))
+  done
+  return 1
 }
 
 # ── Key reading (bash 3.2 compatible) ──
@@ -211,7 +244,8 @@ while true; do
   case "$_key" in
     $'\033[A'|k) _move -1 ;;
     $'\033[B'|j) _move 1 ;;
-    $'\t')       _do_toggle ;;
+    h)           _move_prev_session ;;
+    l|$'\t')     _do_toggle ;;
     '')
       if [[ "${vis_type[$selected]}" == "H" ]]; then
         _do_toggle
@@ -219,6 +253,7 @@ while true; do
         _do_jump && break
       fi ;;
     q|$'\033')   break ;;
+    *)           _try_shortcut "$_key" ;;
   esac
   _draw
 done
