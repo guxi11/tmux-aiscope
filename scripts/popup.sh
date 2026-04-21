@@ -97,16 +97,16 @@ _rebuild() {
       while [ $j -lt ${#all_type[@]} ] && [[ "${all_type[$j]}" == "W" ]]; do
         n=$((n+1)); j=$((j+1))
       done
-      local arrow; _is_collapsed "$s" && arrow="▶" || arrow="▼"
+      local arrow; _is_collapsed "$s" && arrow="+" || arrow="-"
       vis_type[${#vis_type[@]}]="H"
-      vis_label[${#vis_label[@]}]="$(printf '\033[1m\033[34m  %s %s (%d)\033[0m' "$arrow" "$s" "$n")"
+      vis_label[${#vis_label[@]}]="$(printf ' \033[1m%s %s\033[0m \033[2m(%d)\033[0m' "$arrow" "$s" "$n")"
       vis_sess[${#vis_sess[@]}]="$s"
       vis_widx[${#vis_widx[@]}]=""
       vis_pid[${#vis_pid[@]}]=""
     elif [[ "$t" == "W" ]]; then
       if ! _is_collapsed "$s"; then
         vis_type[${#vis_type[@]}]="W"
-        vis_label[${#vis_label[@]}]="   ${all_label[$i]}"
+        vis_label[${#vis_label[@]}]="  ${all_label[$i]}"
         vis_sess[${#vis_sess[@]}]="$s"
         vis_widx[${#vis_widx[@]}]="${all_widx[$i]}"
         vis_pid[${#vis_pid[@]}]="${all_pid[$i]}"
@@ -147,9 +147,9 @@ _draw() {
   local i=0
   while [ $i -lt ${#vis_label[@]} ]; do
     if [ $i -eq $selected ]; then
-      printf '\033[7m%s\033[0m\033[K\n' "${vis_label[$i]}"
+      printf '\033[36m>\033[0m%s\033[K\n' "${vis_label[$i]}"
     else
-      printf '%s\033[K\n' "${vis_label[$i]}"
+      printf ' %s\033[K\n' "${vis_label[$i]}"
     fi
     i=$((i+1))
   done
