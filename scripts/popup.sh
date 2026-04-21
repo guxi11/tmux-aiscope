@@ -164,7 +164,7 @@ _default_sel() {
 
 # ── Render ──
 _draw() {
-  printf '\033[H\033[1m  AI Panes\033[0m  \033[2mj/k:nav  h:prev  l:fold  enter:jump  q:quit\033[0m\n'
+  printf '\033[H\033[1m  aiscope\033[0m  \033[2mj/k:nav  h:prev  l:fold  enter:jump  q:quit\033[0m\n'
   printf '  \033[2m─────────────────────────────────────────────────\033[0m\n'
   local fi=""
   for m in all:a idle:i running:r blocked:b; do

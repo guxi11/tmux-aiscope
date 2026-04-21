@@ -34,10 +34,8 @@ run-shell ~/.tmux/plugins/tmux-aiscope/tmux-aiscope.tmux
 ## Configuration
 
 ```bash
-set -g @aiscope-key          'a'            # keybinding (default: a)
-set -g @aiscope-popup-size   '80%'          # popup dimensions (default: 80%)
-set -g @aiscope-providers    'claude aider' # enabled providers (default: claude)
-set -g @aiscope-show-idle    'on'           # show idle sessions (default: on)
+set -g @aiscope-key          'a'    # keybinding (default: a)
+set -g @aiscope-popup-size   '80%'  # popup dimensions (default: 80%)
 ```
 
 ## Supported Providers
@@ -45,8 +43,6 @@ set -g @aiscope-show-idle    'on'           # show idle sessions (default: on)
 | Tool | Model detection | Token count |
 |------|----------------|-------------|
 | Claude Code | pane capture + `~/.claude/` JSONL | ✓ |
-| Aider | pane capture (startup banner) | — |
-| Generic | process name only | — |
 
 ## Keybindings (inside popup)
 
@@ -55,7 +51,11 @@ set -g @aiscope-show-idle    'on'           # show idle sessions (default: on)
 | `Enter` | Jump to selected pane |
 | `j` / `↓` | Move down |
 | `k` / `↑` | Move up |
-| `Tab` | Collapse/expand session |
+| `h` | Previous session |
+| `l` | Fold/unfold session |
+| `Tab` | Cycle filter |
+| `a` `i` `r` `b` | Filter: all / idle / running / blocked |
+| `0-9` | Shortcut jump |
 | `q` / `Esc` | Close |
 
 ## License
