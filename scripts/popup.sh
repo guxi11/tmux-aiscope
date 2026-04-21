@@ -19,6 +19,10 @@ vis_sess=()
 vis_widx=()
 vis_pid=()
 
+# ── Row append helpers ──
+_push_all() { all_type+=("$1"); all_label+=("$2"); all_sess+=("$3"); all_widx+=("$4"); all_pid+=("$5"); all_status+=("$6"); }
+_push_vis() { vis_type+=("$1"); vis_label+=("$2"); vis_sess+=("$3"); vis_widx+=("$4"); vis_pid+=("$5"); }
+
 filter_mode="all"  # all|idle|running|blocked
 collapsed=""       # space-separated collapsed session names
 selected=0
@@ -44,17 +48,13 @@ _set_filter() {
   filter_mode="$1"
   local prev_sess="${vis_sess[$selected]}" prev_widx="${vis_widx[$selected]}" prev_type="${vis_type[$selected]}"
   _rebuild
-  local i=0
-  while [ $i -lt ${#vis_type[@]} ]; do
-    if [[ "${vis_sess[$i]}" == "$prev_sess" && "${vis_widx[$i]}" == "$prev_widx" && "${vis_type[$i]}" == "$prev_type" ]]; then
-      selected=$i; return
-    fi
-    i=$((i+1))
+  local i
+  for ((i=0; i<${#vis_type[@]}; i++)); do
+    [[ "${vis_sess[$i]}" == "$prev_sess" && "${vis_widx[$i]}" == "$prev_widx" && "${vis_type[$i]}" == "$prev_type" ]] &&
+      { selected=$i; return; }
   done
-  i=0
-  while [ $i -lt ${#vis_type[@]} ]; do
+  for ((i=0; i<${#vis_type[@]}; i++)); do
     [[ "${vis_type[$i]}" == "W" ]] && { selected=$i; return; }
-    i=$((i+1))
   done
   selected=0
 }
@@ -85,27 +85,16 @@ _load() {
     [[ "$sname" == "-" ]]  && sname=""
 
     if [[ "$sess" != "$prev" ]]; then
-      all_type[${#all_type[@]}]="H"
-      all_label[${#all_label[@]}]=""
-      all_sess[${#all_sess[@]}]="$sess"
-      all_widx[${#all_widx[@]}]=""
-      all_pid[${#all_pid[@]}]=""
-      all_status[${#all_status[@]}]=""
+      _push_all "H" "" "$sess" "" "" ""
       prev="$sess"
     fi
 
     # Build window display line
-    local icon
+    local icon st_text nst
     case "$status" in
-      running) icon=$(printf '\033[32m●\033[0m') ;;
-      blocked) icon=$(printf '\033[33m●\033[0m') ;;
-      *)       icon=$(printf '\033[90m○\033[0m') ;;
-    esac
-    local st_text
-    case "$status" in
-      running) st_text="running" ;;
-      blocked) st_text="blocked" ;;
-      *)       st_text="idle   " ;;
+      running) icon=$'\033[32m●\033[0m' st_text="running" nst="running" ;;
+      blocked) icon=$'\033[33m●\033[0m' st_text="blocked" nst="blocked" ;;
+      *)       icon=$'\033[90m○\033[0m' st_text="idle   " nst="idle"    ;;
     esac
     local line
     line=$(printf ' %s %-7s' "$icon" "$st_text")
@@ -113,50 +102,34 @@ _load() {
     [[ -n "$ctx" ]]   && line="$line  $(printf '\033[2m%s\033[0m' "$ctx")"
     [[ -n "$sname" ]] && line="$line  $(printf '\033[33m%s\033[0m' "$sname")"
 
-    local nst; case "$status" in running|blocked) nst="$status" ;; *) nst="idle" ;; esac
-    all_type[${#all_type[@]}]="W"
-    all_label[${#all_label[@]}]="$line"
-    all_sess[${#all_sess[@]}]="$sess"
-    all_widx[${#all_widx[@]}]="$widx"
-    all_pid[${#all_pid[@]}]="$pid"
-    all_status[${#all_status[@]}]="$nst"
+    _push_all "W" "$line" "$sess" "$widx" "$pid" "$nst"
   done <<< "$data"
   return 0
 }
 
 # ── Build visible list ──
+_match_filter() { [[ "$filter_mode" == "all" || "${all_status[$1]}" == "$filter_mode" ]]; }
+
 _rebuild() {
   vis_type=(); vis_label=(); vis_sess=(); vis_widx=(); vis_pid=()
-  local i=0
-  while [ $i -lt ${#all_type[@]} ]; do
-    local t="${all_type[$i]}" s="${all_sess[$i]}"
+  local i t s
+  for ((i=0; i<${#all_type[@]}; i++)); do
+    t="${all_type[$i]}" s="${all_sess[$i]}"
     if [[ "$t" == "H" ]]; then
       # Count matching windows under this header
-      local n=0 j=$((i+1))
-      while [ $j -lt ${#all_type[@]} ] && [[ "${all_type[$j]}" == "W" ]]; do
-        if [[ "$filter_mode" == "all" ]] || [[ "${all_status[$j]}" == "$filter_mode" ]]; then
-          n=$((n+1))
-        fi
-        j=$((j+1))
+      local n=0 j
+      for ((j=i+1; j<${#all_type[@]}; j++)); do
+        [[ "${all_type[$j]}" != "W" ]] && break
+        _match_filter $j && ((n++))
       done
-      if [ $n -gt 0 ]; then
+      if ((n > 0)); then
         local arrow; _is_collapsed "$s" && arrow="+" || arrow="-"
-        vis_type[${#vis_type[@]}]="H"
-        vis_label[${#vis_label[@]}]="$(printf ' \033[1m%s %s\033[0m \033[2m(%d)\033[0m' "$arrow" "$s" "$n")"
-        vis_sess[${#vis_sess[@]}]="$s"
-        vis_widx[${#vis_widx[@]}]=""
-        vis_pid[${#vis_pid[@]}]=""
+        _push_vis "H" "$(printf ' \033[1m%s %s\033[0m \033[2m(%d)\033[0m' "$arrow" "$s" "$n")" "$s" "" ""
       fi
     elif [[ "$t" == "W" ]]; then
-      if ! _is_collapsed "$s" && { [[ "$filter_mode" == "all" ]] || [[ "${all_status[$i]}" == "$filter_mode" ]]; }; then
-        vis_type[${#vis_type[@]}]="W"
-        vis_label[${#vis_label[@]}]="  ${all_label[$i]}"
-        vis_sess[${#vis_sess[@]}]="$s"
-        vis_widx[${#vis_widx[@]}]="${all_widx[$i]}"
-        vis_pid[${#vis_pid[@]}]="${all_pid[$i]}"
-      fi
+      ! _is_collapsed "$s" && _match_filter $i &&
+        _push_vis "W" "  ${all_label[$i]}" "$s" "${all_widx[$i]}" "${all_pid[$i]}"
     fi
-    i=$((i+1))
   done
 }
 
@@ -167,31 +140,24 @@ _move() {
 }
 
 _move_prev_session() {
-  local i=$((selected - 1)) n=${#vis_type[@]}
-  while [ $i -ge 0 ]; do
+  local i n=${#vis_type[@]}
+  for ((i=selected-1; i>=0; i--)); do
     [[ "${vis_type[$i]}" == "H" ]] && { selected=$i; return; }
-    i=$((i-1))
   done
   # wrap to last header
-  i=$((n - 1))
-  while [ $i -gt $selected ]; do
+  for ((i=n-1; i>selected; i--)); do
     [[ "${vis_type[$i]}" == "H" ]] && { selected=$i; return; }
-    i=$((i-1))
   done
 }
 
 _default_sel() {
-  local i=0
-  while [ $i -lt ${#vis_type[@]} ]; do
-    if [[ "${vis_type[$i]}" == "W" && "${vis_sess[$i]}" == "$cur_sess" && "${vis_widx[$i]}" == "$cur_widx" ]]; then
-      selected=$i; return
-    fi
-    i=$((i+1))
+  local i
+  for ((i=0; i<${#vis_type[@]}; i++)); do
+    [[ "${vis_type[$i]}" == "W" && "${vis_sess[$i]}" == "$cur_sess" && "${vis_widx[$i]}" == "$cur_widx" ]] &&
+      { selected=$i; return; }
   done
-  i=0
-  while [ $i -lt ${#vis_type[@]} ]; do
+  for ((i=0; i<${#vis_type[@]}; i++)); do
     [[ "${vis_type[$i]}" == "W" ]] && { selected=$i; return; }
-    i=$((i+1))
   done
   selected=0
 }
@@ -210,18 +176,16 @@ _draw() {
     fi
   done
   printf '  %b \033[2mtab:cycle\033[0m\n\n' "$fi"
-  local i=0 pool_len=${#_SHORTCUT_POOL}
-  while [ $i -lt ${#vis_label[@]} ]; do
-    if [ $i -eq $selected ]; then
-      local sc=" "
-      [ $i -lt $pool_len ] && sc="${_SHORTCUT_POOL:$i:1}"
+  local i pool_len=${#_SHORTCUT_POOL} sc
+  for ((i=0; i<${#vis_label[@]}; i++)); do
+    sc=" "
+    if ((i == selected)); then
+      ((i < pool_len)) && sc="${_SHORTCUT_POOL:$i:1}"
       printf '\033[7m%s\033[0m%s\033[K\n' "$sc" "${vis_label[$i]}"
     else
-      local sc=" "
-      [ $i -lt $pool_len ] && sc=$(printf '\033[90m%s\033[0m' "${_SHORTCUT_POOL:$i:1}")
+      ((i < pool_len)) && sc=$(printf '\033[90m%s\033[0m' "${_SHORTCUT_POOL:$i:1}")
       printf '%s%s\033[K\n' "$sc" "${vis_label[$i]}"
     fi
-    i=$((i+1))
   done
   printf '\033[J'
 }
@@ -232,12 +196,11 @@ _do_toggle() {
   [[ -z "$s" ]] && return
   _toggle_collapse "$s"
   _rebuild
-  local i=0
-  while [ $i -lt ${#vis_sess[@]} ]; do
+  local i
+  for ((i=0; i<${#vis_sess[@]}; i++)); do
     [[ "${vis_sess[$i]}" == "$s" && "${vis_type[$i]}" == "H" ]] && { selected=$i; break; }
-    i=$((i+1))
   done
-  [ $selected -ge ${#vis_type[@]} ] && selected=$((${#vis_type[@]} - 1))
+  ((selected >= ${#vis_type[@]})) && selected=$((${#vis_type[@]} - 1))
 }
 
 _do_jump() {
@@ -251,14 +214,10 @@ _do_jump() {
 }
 
 _try_shortcut() {
-  local key="$1" i=0 n=${#vis_type[@]}
-  [ $n -gt ${#_SHORTCUT_POOL} ] && n=${#_SHORTCUT_POOL}
-  while [ $i -lt $n ]; do
-    if [[ "$key" == "${_SHORTCUT_POOL:$i:1}" ]]; then
-      selected=$i
-      return 0
-    fi
-    i=$((i+1))
+  local key="$1" i n=${#vis_type[@]}
+  ((n > ${#_SHORTCUT_POOL})) && n=${#_SHORTCUT_POOL}
+  for ((i=0; i<n; i++)); do
+    [[ "$key" == "${_SHORTCUT_POOL:$i:1}" ]] && { selected=$i; return 0; }
   done
   return 1
 }
