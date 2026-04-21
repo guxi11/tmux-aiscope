@@ -262,7 +262,7 @@ while true; do
     b)           _set_filter "blocked" ;;
     '')          _do_jump && break ;;
     q|$'\033')   break ;;
-    *)           _try_shortcut "$_key" ;;
+    *)           _try_shortcut "$_key" && _do_jump && break ;;
   esac
   _draw
 done
