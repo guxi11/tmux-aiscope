@@ -5,10 +5,44 @@
 _LIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 _provider_for() {
+  # Fast path: direct process name → provider
   case "$1" in
     claude) echo "claude" ;;
-    *)      echo ""        ;;
   esac
+}
+
+# Fallback: walk the pane's full process subtree and match by cmdline.
+# Handles any wrapper (node, python, bash …) around a known AI tool.
+# Returns provider name, or empty if no AI process found.
+_provider_from_subtree() {
+  local pane_id="$1"
+  local pane_pid
+  pane_pid=$(tmux display-message -p -t "$pane_id" '#{pane_pid}' 2>/dev/null)
+  [[ -z "$pane_pid" ]] && return
+
+  ps -ax -o pid=,ppid=,args= 2>/dev/null | awk -v root="$pane_pid" '
+    {
+      pid=$1; ppid=$2; $1=""; $2=""; args=$0; gsub(/^ +/,"",args)
+      parent[pid]=ppid; cmdline[pid]=args
+    }
+    END {
+      # expand descendant set (iterative BFS)
+      tree[root]=1
+      do {
+        changed=0
+        for (p in parent) {
+          if ((parent[p] in tree) && !(p in tree)) { tree[p]=1; changed=1 }
+        }
+      } while (changed)
+
+      for (p in tree) {
+        a = cmdline[p]
+        if (a ~ /claude-internal/ || a ~ /(^|\/)claude( |$|-)/) {
+          print "claude"; exit
+        }
+      }
+    }
+  '
 }
 
 _fmt_context() {
@@ -29,6 +63,9 @@ _process_pane() {
 
   local provider_name
   provider_name=$(_provider_for "$process")
+
+  # Slow path: scan process subtree by cmdline
+  [[ -z "$provider_name" ]] && provider_name=$(_provider_from_subtree "$pane_id")
   [[ -z "$provider_name" ]] && return
 
   local provider_script="${_LIST_DIR}/providers/${provider_name}.sh"

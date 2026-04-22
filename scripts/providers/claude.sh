@@ -101,8 +101,19 @@ _claude_cwd_from_pane() {
   pane_pid=$(tmux display-message -p -t "$pane_id" '#{pane_pid}' 2>/dev/null)
   [[ -z "$pane_pid" ]] && return
 
+  # Walk the process tree from pane_pid to find a 'claude' process
+  # Handles both direct (pane → claude) and wrapped (pane → node → claude) cases
   local claude_pid
-  claude_pid=$(ps -ax -o pid,ppid 2>/dev/null | awk -v ppid="$pane_pid" '$2==ppid {print $1; exit}')
+  claude_pid=$(ps -ax -o pid,ppid,comm 2>/dev/null | awk -v root="$pane_pid" '
+    BEGIN { ppids[root]=1 }
+    {
+      pid=$1; ppid=$2; comm=$3
+      if (ppid in ppids) {
+        ppids[pid]=1
+        if (comm=="claude") { print pid; exit }
+      }
+    }
+  ')
   [[ -z "$claude_pid" ]] && return
 
   local sess_file="${HOME}/.claude/sessions/${claude_pid}.json"
