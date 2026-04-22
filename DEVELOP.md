@@ -11,7 +11,7 @@ git clone https://github.com/Guxi11/tmux-aiscope ~/develop/tmux-aiscope
 Add to `~/.tmux.conf`:
 
 ```bash
-run-shell "~/develop/tmux-aiscope/tmux-aiscope.tmux"
+run "~/develop/tmux-aiscope/tmux-aiscope.tmux"
 ```
 
 Reload after every change:

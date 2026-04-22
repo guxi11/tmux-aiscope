@@ -15,11 +15,28 @@ Press `prefix + a` → pick a pane → jumps straight to it.
 
 **TPM (recommended)**
 
+If you don't have TPM yet:
+
 ```bash
-set -g @plugin 'Guxi11/tmux-aiscope'
+git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
 ```
 
-Then `prefix + I` to install.
+Add to the **bottom** of `~/.tmux.conf`:
+
+```bash
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-sensible'
+set -g @plugin 'Guxi11/tmux-aiscope'
+
+run '~/.tmux/plugins/tpm/tpm'
+```
+
+Reload tmux config, then install plugins:
+
+```bash
+tmux source ~/.tmux.conf
+# inside tmux: prefix + I
+```
 
 **Manual**
 
@@ -30,7 +47,7 @@ git clone https://github.com/Guxi11/tmux-aiscope ~/.tmux/plugins/tmux-aiscope
 Add to `~/.tmux.conf`:
 
 ```bash
-run-shell ~/.tmux/plugins/tmux-aiscope/tmux-aiscope.tmux
+run ~/.tmux/plugins/tmux-aiscope/tmux-aiscope.tmux
 ```
 
 ## Configuration
