@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # Interactive AI pane selector inside tmux display-popup.
-# j/k or arrows: navigate, Enter: jump, Tab: cycle filter, a/i/r/b: filter, l: fold, q/Esc: close.
+# j/k or arrows: navigate, Enter: jump, Tab: cycle filter, a/i/r/b: filter, l: fold, g: refresh, q/Esc: close.
 
 _POPUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Refresh ──
+_refresh() {
+  all_type=(); all_label=(); all_sess=(); all_widx=(); all_pid=(); all_status=()
+  _load || return 1
+  _rebuild
+  ((selected >= ${#vis_type[@]})) && selected=$((${#vis_type[@]} - 1))
+}
 
 # ── All data (immutable after load) ──
 all_type=()      # H=header, W=window
@@ -26,7 +34,7 @@ _push_vis() { vis_type+=("$1"); vis_label+=("$2"); vis_sess+=("$3"); vis_widx+=(
 filter_mode="all"  # all|idle|running|blocked
 collapsed=""       # space-separated collapsed session names
 selected=0
-_SHORTCUT_POOL="0123456789cdefgmnopstuvwxyz"
+_SHORTCUT_POOL="0123456789cdefmnopstuvwxyz"
 cur_sess="" cur_widx=""
 
 # ── Collapse helpers ──
@@ -164,7 +172,7 @@ _default_sel() {
 
 # ── Render ──
 _draw() {
-  printf '\033[H\033[1m  aiscope\033[0m  \033[2mj/k:nav  h:prev  l:fold  enter:jump  q:quit\033[0m\n'
+  printf '\033[H\033[1m  aiscope\033[0m  \033[2mj/k:nav  h:prev  l:fold  g:refresh  enter:jump  q:quit\033[0m\n'
   printf '  \033[2m─────────────────────────────────────────────────\033[0m\n'
   local fi=""
   for m in all:a idle:i running:r blocked:b; do
@@ -260,6 +268,7 @@ while true; do
     i)           _set_filter "idle" ;;
     r)           _set_filter "running" ;;
     b)           _set_filter "blocked" ;;
+    g)           _refresh ;;
     '')          _do_jump && break ;;
     q|$'\033')   break ;;
     *)           _try_shortcut "$_key" && _do_jump && break ;;

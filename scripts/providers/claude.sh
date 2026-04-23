@@ -38,7 +38,8 @@ for line in sys.stdin:
     sid=d.get('sessionId','')
     if not disp or not sid: continue
     print('H\t'+sid+'\t'+proj+'\t'+disp[:80])
-    if not disp.startswith('/') and sid not in seen:
+    # Session name: first non-slash, multi-word display per session
+    if not disp.startswith('/') and ' ' in disp.strip() and sid not in seen:
         seen[sid]=disp[:300]
 for sid,disp in seen.items():
     print('N\t'+sid+'\t'+disp)
@@ -92,17 +93,15 @@ _claude_context_from_jsonl() {
   echo $(( ${input:-0} + ${cache_read:-0} + ${cache_create:-0} ))
 }
 
-# Map tmux pane → claude PID → ~/.claude/sessions/{pid}.json → cwd
-# NOTE: sessionId from this file can be stale after /clear or /resume.
-#       Use this only for cwd; get sessionId from history index.
-_claude_cwd_from_pane() {
+# Map tmux pane → claude PID → ~/.claude/sessions/{pid}.json → cwd + sessionId
+# Returns: cwd|sessionId (pipe-separated)
+# NOTE: sessionId can be stale after /clear or /resume; use as fallback only.
+_claude_pane_info() {
   local pane_id="$1"
   local pane_pid
   pane_pid=$(tmux display-message -p -t "$pane_id" '#{pane_pid}' 2>/dev/null)
   [[ -z "$pane_pid" ]] && return
 
-  # Walk the process tree from pane_pid to find a 'claude' process
-  # Handles both direct (pane → claude) and wrapped (pane → node → claude) cases
   local claude_pid
   claude_pid=$(ps -ax -o pid,ppid,comm 2>/dev/null | awk -v root="$pane_pid" '
     BEGIN { ppids[root]=1 }
@@ -118,7 +117,10 @@ _claude_cwd_from_pane() {
 
   local sess_file="${HOME}/.claude/sessions/${claude_pid}.json"
   [[ -f "$sess_file" ]] || return
-  grep -o '"cwd":"[^"]*"' "$sess_file" | head -1 | cut -d'"' -f4
+  local cwd sid
+  cwd=$(grep -o '"cwd":"[^"]*"' "$sess_file" | head -1 | cut -d'"' -f4)
+  sid=$(grep -o '"sessionId":"[^"]*"' "$sess_file" | head -1 | cut -d'"' -f4)
+  echo "${cwd}|${sid}"
 }
 
 # Find sessionId by matching visible prompts against history index.
@@ -210,16 +212,28 @@ provider_get_info() {
   local pane_path
   pane_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}' 2>/dev/null)
 
-  # Resolve project dir (PID session file for cwd, or pane path)
-  local project_dir sess_cwd
-  sess_cwd=$(_claude_cwd_from_pane "$pane_id")
+  # Resolve project dir and file-based sessionId
+  local project_dir sess_cwd file_sid=""
+  local pane_info
+  pane_info=$(_claude_pane_info "$pane_id")
+  sess_cwd="${pane_info%%|*}"
+  file_sid="${pane_info#*|}"
   project_dir=$(_claude_project_dir "${sess_cwd:-$pane_path}")
 
   # Find sessionId via history index (reliable after /clear)
   local sid="" jsonl=""
   content=$(tmux capture-pane -p -t "$pane_id" -S - 2>/dev/null)
+  # Extract full prompts, joining wrapped continuation lines back onto ❯ lines
   local prompts
-  prompts=$(echo "$content" | grep '^❯ [^/]' | sed 's/^❯ //' | grep -v '^\s*$')
+  prompts=$(echo "$content" | awk '
+    /^❯ [^\/]/ { if (buf) print buf; sub(/^❯ /, "", $0); buf=$0; next }
+    /^❯ /      { if (buf) print buf; buf=""; next }
+    /^[╭╰│►▸✓✗●○┌└├─╌⎿⏺✻⚠]/ || /^  / || /^[[:space:]]*$/ || /^[A-Z][a-z]+ [0-9]/ {
+      if (buf) print buf; buf=""; next
+    }
+    buf { gsub(/^[[:space:]]+/,"",$0); buf=buf " " $0 }
+    END { if (buf) print buf }
+  ' | grep -v '^\s*$')
 
   if [[ -z "$prompts" && -z "$project_dir" ]]; then
     status=$(detect_status_claude_terminal "$pane_id" "$content")
@@ -228,18 +242,20 @@ provider_get_info() {
     return
   fi
 
-  sid=$(_claude_resolve_session "$prompts" "${sess_cwd:-$pane_path}")
+  if [[ -n "$prompts" ]]; then
+    sid=$(_claude_resolve_session "$prompts" "${sess_cwd:-$pane_path}")
+    [[ -z "$sid" && -n "$file_sid" ]] && sid="$file_sid"
+  fi
 
   # JSONL from history match
   if [[ -n "$sid" && -n "$project_dir" ]]; then
     jsonl="${project_dir}/${sid}.jsonl"
   fi
 
-  # Session name
+  # Session name: from history only, no tmux pane fallback
   if [[ -n "$sid" && -f "$_CLAUDE_HISTORY_INDEX" ]]; then
     session_name=$(awk -F'\t' -v sid="$sid" '$1=="N" && $2==sid {print $3}' "$_CLAUDE_HISTORY_INDEX" | tail -1)
   fi
-  [[ -z "$session_name" ]] && session_name="$(echo "$prompts" | tail -1 | head -c 300)"
 
   # Model + context from JSONL
   if [[ -f "$jsonl" ]]; then
