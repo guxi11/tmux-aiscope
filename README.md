@@ -63,6 +63,10 @@ set -g @aiscope-popup-size   '80%'  # popup dimensions (default: 80%)
 |------|----------------|-------------|
 | Claude Code | pane capture + `~/.claude/` JSONL | ✓ |
 
+Claude wrappers are auto-detected: any `~/.*claude*/` directory is treated as
+a variant's data dir (binary name = dir name without the leading dot). Zero
+config — install a fork like `claude-internal` and it just shows up.
+
 ## Keybindings (inside popup)
 
 | Key | Action |

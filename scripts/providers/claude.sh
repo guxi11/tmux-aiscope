@@ -1,32 +1,34 @@
 #!/usr/bin/env bash
-# Provider: Claude Code
+# Provider: Claude Code (and claude-family wrappers)
 # Output: "model|status|context_tokens|session_name"
 #
-# Status detection priority:
-#   1. JSONL mtime + last-entry type (structured, reliable)
-#   2. Terminal capture fallback (for fresh sessions without JSONL)
+# Variants are auto-discovered from $HOME/.*claude*/ by list_ai_panes.sh and
+# passed via AISCOPE_CLAUDE_VARIANTS ("bin<TAB>data_dir" per line).
 #
-# Session resolution:
-#   PID → sessions/{pid}.json → cwd (reliable)
-#   History index → sessionId (reliable after /clear)
+# Strategy: the unified history index across all variants is the single source
+# of truth. Match visible pane prompts against it to get (variant_dir, sid) —
+# the JSONL path follows mechanically. No pid/session-file probing needed.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../detect_status.sh"
 
-# ── Init hook: build history index (called once by list_ai_panes.sh) ──
-
-# Build history index from ~/.claude/history.jsonl.
-# Output format (tab-separated):
-#   H<TAB>sessionId<TAB>project<TAB>display_prefix_80
-#   N<TAB>sessionId<TAB>session_name_300
+# ── Init hook: build unified history index across all variants ──
+# Format (tab-separated):
+#   H<TAB>dir<TAB>sessionId<TAB>project<TAB>display_prefix_80
+#   N<TAB>dir<TAB>sessionId<TAB>session_name_300
 provider_init() {
   local tmpdir="$1"
-  local hfile="${HOME}/.claude/history.jsonl"
   local out="$tmpdir/claude_history_index"
+  : > "$out"
 
-  if [[ -f "$hfile" ]]; then
-    tail -5000 "$hfile" | python3 -c "
-import json,sys
+  local line dir hfile
+  while IFS=$'\t' read -r _ dir; do
+    [[ -z "$dir" ]] && continue
+    hfile="${dir}/history.jsonl"
+    [[ -f "$hfile" ]] || continue
+    tail -5000 "$hfile" | DIR="$dir" python3 -c "
+import json,os,sys
+dir=os.environ['DIR']
 seen={}
 for line in sys.stdin:
     line=line.strip()
@@ -37,27 +39,18 @@ for line in sys.stdin:
     proj=d.get('project','')
     sid=d.get('sessionId','')
     if not disp or not sid: continue
-    print('H\t'+sid+'\t'+proj+'\t'+disp[:80])
-    # Session name: first non-slash, multi-word display per session
+    print('H\t'+dir+'\t'+sid+'\t'+proj+'\t'+disp[:80])
     if not disp.startswith('/') and ' ' in disp.strip() and sid not in seen:
         seen[sid]=disp[:300]
 for sid,disp in seen.items():
-    print('N\t'+sid+'\t'+disp)
-" > "$out" 2>/dev/null
-  fi
+    print('N\t'+dir+'\t'+sid+'\t'+disp)
+" >> "$out" 2>/dev/null
+  done <<< "$AISCOPE_CLAUDE_VARIANTS"
 
   export _CLAUDE_HISTORY_INDEX="$out"
 }
 
 # ── Internal helpers ──
-
-_claude_project_dir() {
-  local pane_path="$1"
-  local encoded
-  encoded=$(echo "$pane_path" | sed 's|/|-|g')
-  local dir="${HOME}/.claude/projects/${encoded}"
-  [[ -d "$dir" ]] && echo "$dir"
-}
 
 _claude_model_from_pane() {
   echo "$1" | grep -oE '(Opus|Sonnet|Haiku) [0-9]+\.[0-9]+' | head -1
@@ -93,38 +86,10 @@ _claude_context_from_jsonl() {
   echo $(( ${input:-0} + ${cache_read:-0} + ${cache_create:-0} ))
 }
 
-# Map tmux pane → claude PID → ~/.claude/sessions/{pid}.json → cwd + sessionId
-# Returns: cwd|sessionId (pipe-separated)
-# NOTE: sessionId can be stale after /clear or /resume; use as fallback only.
-_claude_pane_info() {
-  local pane_id="$1"
-  local pane_pid
-  pane_pid=$(tmux display-message -p -t "$pane_id" '#{pane_pid}' 2>/dev/null)
-  [[ -z "$pane_pid" ]] && return
-
-  local claude_pid
-  claude_pid=$(ps -ax -o pid,ppid,comm 2>/dev/null | awk -v root="$pane_pid" '
-    BEGIN { ppids[root]=1 }
-    {
-      pid=$1; ppid=$2; comm=$3
-      if (ppid in ppids) {
-        ppids[pid]=1
-        if (comm=="claude") { print pid; exit }
-      }
-    }
-  ')
-  [[ -z "$claude_pid" ]] && return
-
-  local sess_file="${HOME}/.claude/sessions/${claude_pid}.json"
-  [[ -f "$sess_file" ]] || return
-  local cwd sid
-  cwd=$(grep -o '"cwd":"[^"]*"' "$sess_file" | head -1 | cut -d'"' -f4)
-  sid=$(grep -o '"sessionId":"[^"]*"' "$sess_file" | head -1 | cut -d'"' -f4)
-  echo "${cwd}|${sid}"
-}
-
-# Find sessionId by matching visible prompts against history index.
-# Uses sliding-window majority vote for disambiguation.
+# Match visible prompts against the unified history index.
+# Scoped to project_path (absolute, as stored by claude's history).
+# Returns "data_dir<TAB>project<TAB>sessionId" on match; empty otherwise.
+# project is taken verbatim from history (authoritative — don't re-encode pane cwd).
 _claude_resolve_session() {
   local prompts="$1" project_path="$2"
   [[ -z "$prompts" || ! -f "$_CLAUDE_HISTORY_INDEX" ]] && return
@@ -138,15 +103,17 @@ _claude_resolve_session() {
       local mt="${p:0:40}"
       mt="${mt#"${mt%%[![:space:]]*}"}"
       [[ -n "$mt" ]] && awk -F'\t' -v proj="$project_path" -v text="$mt" \
-        '$1=="H" && $3==proj && index($4, text)>0 {print $2}' \
+        '$1=="H" && $4==proj && index($5, text)>0 {print $2"\t"$4"\t"$3}' \
         "$_CLAUDE_HISTORY_INDEX" | sort -u
     done | sort | uniq -c | sort -rn)
-    local top_count top_sid second_count
-    top_count=$(echo "$votes" | head -1 | awk '{print $1}')
-    top_sid=$(echo "$votes" | head -1 | awk '{print $2}')
+
+    local top_line top_count top_payload second_count
+    top_line=$(echo "$votes" | head -1)
+    top_count=$(echo "$top_line" | awk '{print $1}')
+    top_payload=$(echo "$top_line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')
     second_count=$(echo "$votes" | sed -n '2p' | awk '{print $1+0}')
-    if [[ -n "$top_sid" && "$top_count" -gt "$second_count" ]]; then
-      echo "$top_sid"
+    if [[ -n "$top_payload" && "$top_count" -gt "$second_count" ]]; then
+      echo "$top_payload"
       return
     fi
     window=$((window + 1))
@@ -154,7 +121,6 @@ _claude_resolve_session() {
 }
 
 # Detect status from JSONL file: mtime + last entry type.
-# Returns: running | blocked | idle | "" (unknown/no file)
 _claude_status_from_jsonl() {
   local jsonl="$1"
   [[ -f "$jsonl" ]] || return
@@ -165,13 +131,11 @@ _claude_status_from_jsonl() {
   [[ -z "$mtime" ]] && return
   age=$(( now - mtime ))
 
-  # Recently modified → actively streaming or executing tools
   if [ "$age" -lt 5 ]; then
     echo "running"
     return
   fi
 
-  # Check last entry type to distinguish idle vs blocked
   local last_line
   last_line=$(tail -1 "$jsonl" 2>/dev/null)
   [[ -z "$last_line" ]] && return
@@ -180,7 +144,6 @@ _claude_status_from_jsonl() {
   entry_type=$(echo "$last_line" | grep -o '"type":"[^"]*"' | head -1 | cut -d'"' -f4)
   entry_subtype=$(echo "$last_line" | grep -o '"subtype":"[^"]*"' | head -1 | cut -d'"' -f4)
 
-  # Definitive idle: turn completed normally
   case "$entry_type" in
     system)
       [[ "$entry_subtype" == "turn_duration" ]] && { echo "idle"; return; } ;;
@@ -188,14 +151,12 @@ _claude_status_from_jsonl() {
       echo "idle"; return ;;
   esac
 
-  # assistant with tool_use as last entry = waiting for permission
   if [[ "$entry_type" == "assistant" ]] && echo "$last_line" | grep -q '"type":"tool_use"'; then
     [ "$age" -gt 300 ] && { echo "idle"; return; }
     echo "blocked"
     return
   fi
 
-  # user/ or attachment/ = turn in progress (claude generating)
   if [ "$age" -gt 300 ]; then
     echo "idle"
   else
@@ -212,50 +173,53 @@ provider_get_info() {
   local pane_path
   pane_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}' 2>/dev/null)
 
-  # Resolve project dir and file-based sessionId
-  local project_dir sess_cwd file_sid=""
-  local pane_info
-  pane_info=$(_claude_pane_info "$pane_id")
-  sess_cwd="${pane_info%%|*}"
-  file_sid="${pane_info#*|}"
-  project_dir=$(_claude_project_dir "${sess_cwd:-$pane_path}")
-
-  # Find sessionId via history index (reliable after /clear)
-  local sid="" jsonl=""
   content=$(tmux capture-pane -p -t "$pane_id" -S - 2>/dev/null)
-  # Extract full prompts, joining wrapped continuation lines back onto ❯ lines
+
+  # Extract full prompts, joining wrapped continuation lines back onto ❯ lines.
+  # On `/clear`, drop everything seen so far — the visible conversation after
+  # clear has nothing to do with prior sessions, and old prompts still sit
+  # in scrollback.
   local prompts
   prompts=$(echo "$content" | awk '
-    /^❯ [^\/]/ { if (buf) print buf; sub(/^❯ /, "", $0); buf=$0; next }
-    /^❯ /      { if (buf) print buf; buf=""; next }
+    function flush() { if (buf != "") { prompts[n++]=buf; buf="" } }
+    /^❯ \/clear/         { flush(); n=0; delete prompts; next }
+    /^❯ [^\/]/           { flush(); sub(/^❯ /, "", $0); buf=$0; next }
+    /^❯ /                { flush(); next }
     /^[╭╰│►▸✓✗●○┌└├─╌⎿⏺✻⚠]/ || /^  / || /^[[:space:]]*$/ || /^[A-Z][a-z]+ [0-9]/ {
-      if (buf) print buf; buf=""; next
+      flush(); next
     }
     buf { gsub(/^[[:space:]]+/,"",$0); buf=buf " " $0 }
-    END { if (buf) print buf }
+    END { flush(); for (i=0; i<n; i++) print prompts[i] }
   ' | grep -v '^\s*$')
 
-  if [[ -z "$prompts" && -z "$project_dir" ]]; then
+  # Resolve (variant_dir, project, sessionId) purely via history-index match.
+  local variant_dir="" project="" sid=""
+  if [[ -n "$prompts" ]]; then
+    local r
+    r=$(_claude_resolve_session "$prompts" "$pane_path")
+    if [[ -n "$r" ]]; then
+      variant_dir="${r%%$'\t'*}"; r="${r#*$'\t'}"
+      project="${r%%$'\t'*}"
+      sid="${r#*$'\t'}"
+    fi
+  fi
+
+  # No history match → terminal-only fallback
+  if [[ -z "$variant_dir" || -z "$sid" ]]; then
     status=$(detect_status_claude_terminal "$pane_id" "$content")
     model=$(_claude_model_from_pane "$content")
     echo "${model}|${status}||"
     return
   fi
 
-  if [[ -n "$prompts" ]]; then
-    sid=$(_claude_resolve_session "$prompts" "${sess_cwd:-$pane_path}")
-    [[ -z "$sid" && -n "$file_sid" ]] && sid="$file_sid"
-  fi
+  # JSONL path: encode the history-provided project (authoritative, not pane cwd).
+  local encoded jsonl
+  encoded=$(echo "$project" | sed 's|/|-|g')
+  jsonl="${variant_dir}/projects/${encoded}/${sid}.jsonl"
 
-  # JSONL from history match
-  if [[ -n "$sid" && -n "$project_dir" ]]; then
-    jsonl="${project_dir}/${sid}.jsonl"
-  fi
-
-  # Session name: from history only, no tmux pane fallback
-  if [[ -n "$sid" && -f "$_CLAUDE_HISTORY_INDEX" ]]; then
-    session_name=$(awk -F'\t' -v sid="$sid" '$1=="N" && $2==sid {print $3}' "$_CLAUDE_HISTORY_INDEX" | tail -1)
-  fi
+  # Session name from history index
+  session_name=$(awk -F'\t' -v dir="$variant_dir" -v sid="$sid" \
+    '$1=="N" && $2==dir && $3==sid {print $4}' "$_CLAUDE_HISTORY_INDEX" | tail -1)
 
   # Model + context from JSONL
   if [[ -f "$jsonl" ]]; then
@@ -264,7 +228,6 @@ provider_get_info() {
   fi
   [[ -z "$model" ]] && model=$(_claude_model_from_pane "$content")
 
-  # Status: JSONL-based (primary) → terminal fallback
   status=$(_claude_status_from_jsonl "$jsonl")
   [[ -z "$status" ]] && status=$(detect_status_claude_terminal "$pane_id" "$content")
 

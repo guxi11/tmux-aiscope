@@ -4,16 +4,35 @@
 
 _LIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-_provider_for() {
-  # Fast path: direct process name → provider
-  case "$1" in
-    claude) echo "claude" ;;
-  esac
+# Zero-config claude-family discovery: any $HOME/.*claude*/ directory is
+# assumed to be a claude-wrapped binary's data dir. Binary name is the dir
+# name minus leading dot. Emits "binary<TAB>abs_dir" per line.
+_aiscope_build_claude_variants() {
+  local d name
+  shopt -s nullglob dotglob
+  for d in "$HOME"/.*claude*/; do
+    name="${d%/}"; name="${name##*/}"; name="${name#.}"
+    [[ -n "$name" ]] && printf '%s\t%s\n' "$name" "${d%/}"
+  done
+  shopt -u nullglob dotglob
 }
 
-# Fallback: walk the pane's full process subtree and match by cmdline.
-# Handles any wrapper (node, python, bash …) around a known AI tool.
-# Returns provider name, or empty if no AI process found.
+# Space-separated list of claude-family binary names.
+_aiscope_claude_bins() {
+  awk -F'\t' 'NF>=1 && $1!="" {printf "%s ", $1}' <<< "$AISCOPE_CLAUDE_VARIANTS"
+}
+
+# Fast path: pane_current_command is any claude-family binary.
+_provider_for() {
+  local cmd="$1" bin
+  for bin in $(_aiscope_claude_bins); do
+    [[ "$cmd" == "$bin" ]] && { echo "claude"; return; }
+  done
+}
+
+# Fallback: walk pane process subtree and match any argv containing "claude".
+# Catches node/python wrappers and oddly-named forks; the provider figures
+# out which variant data-dir owns the session.
 _provider_from_subtree() {
   local pane_id="$1"
   local pane_pid
@@ -26,7 +45,6 @@ _provider_from_subtree() {
       parent[pid]=ppid; cmdline[pid]=args
     }
     END {
-      # expand descendant set (iterative BFS)
       tree[root]=1
       do {
         changed=0
@@ -34,12 +52,8 @@ _provider_from_subtree() {
           if ((parent[p] in tree) && !(p in tree)) { tree[p]=1; changed=1 }
         }
       } while (changed)
-
       for (p in tree) {
-        a = cmdline[p]
-        if (a ~ /claude-internal/ || a ~ /(^|\/)claude( |$|-)/) {
-          print "claude"; exit
-        }
+        if (cmdline[p] ~ /claude/) { print "claude"; exit }
       }
     }
   '
@@ -63,8 +77,6 @@ _process_pane() {
 
   local provider_name
   provider_name=$(_provider_for "$process")
-
-  # Slow path: scan process subtree by cmdline
   [[ -z "$provider_name" ]] && provider_name=$(_provider_from_subtree "$pane_id")
   [[ -z "$provider_name" ]] && return
 
@@ -91,6 +103,10 @@ main() {
   local tmpdir
   tmpdir=$(mktemp -d)
   trap 'rm -rf "$tmpdir"' EXIT
+
+  # Build claude-variant table once, export for subshells & providers.
+  export AISCOPE_CLAUDE_VARIANTS
+  AISCOPE_CLAUDE_VARIANTS=$(_aiscope_build_claude_variants)
 
   # ── Phase 1: Provider init hooks ──
   # Each provider can implement provider_init() to prepare shared data
